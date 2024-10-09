@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -11,6 +13,24 @@ from x_transformers import (
     Encoder,
     NonAutoregressiveWrapper
 )
+
+# tensor typing
+
+import jaxtyping
+from jaxtyping import jaxtyped
+from beartype import beartype
+from beartype.door import is_bearable
+
+class TorchTyping:
+    def __init__(self, abstract_dtype):
+        self.abstract_dtype = abstract_dtype
+
+    def __getitem__(self, shapes: str):
+        return self.abstract_dtype[Tensor, shapes]
+
+Float = TorchTyping(jaxtyping.Float)
+Int   = TorchTyping(jaxtyping.Int)
+Bool  = TorchTyping(jaxtyping.Bool)
 
 # helper functions
 

@@ -26,8 +26,10 @@ classifiers=[
 ]
 
 dependencies = [
+    "beartype",
     "einops>=0.8.0",
     "ema-pytorch",
+    "jaxtyping",
     "torch>=2.0",
     "vector-quantize-pytorch>=1.17.8",
     "x-transformers>=1.37.9"
