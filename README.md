@@ -4,6 +4,10 @@
 
 Implementation of the proposed [MaskBit](https://arxiv.org/abs/2409.16211) from Bytedance AI
 
+This paper can be viewed as a modernized version of the architecture from [Taming Transformers](https://arxiv.org/abs/2012.09841) from Esser et al.
+
+They use the binary scalar quantization proposed in [MagVit2](https://arxiv.org/abs/2310.05737) in their autoencoder, and then non-autoregressive mask decoding, where the masking is setting the bit (`-1` or `+1`) to `0`, projected for the transformer without explicit embeddings for the trit
+
 ## Citations
 
 ```bibtex
