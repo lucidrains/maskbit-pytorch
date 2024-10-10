@@ -1,6 +1,8 @@
+<img src="./maskbit.png" width="400px"></img>
+
 ## MaskBit - Pytorch (wip)
 
-Implementation of the proposed MaskBit from Bytedance AI
+Implementation of the proposed [MaskBit](https://arxiv.org/abs/2409.16211) from Bytedance AI
 
 ## Citations
 
