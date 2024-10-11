@@ -14,6 +14,15 @@ from x_transformers import (
     NonAutoregressiveWrapper
 )
 
+from einops.layers.torch import Rearrange
+
+# ein notation
+# b - batch
+# c - channels
+# h - height
+# w - width
+# n - raw bits sequence length
+
 # tensor typing
 
 import jaxtyping
@@ -46,9 +55,12 @@ class BQVAE(Module):
     def __init__(
         self,
         dim,
+        channels = 3,
         lfq_kwargs: dict = dict()
     ):
         super().__init__()
+        self._c = channels
+        self.encoder = nn.Conv2d(3, dim, 1)
 
         self.lfq = LFQ(
             codebook_size = 2, # number of codes is not applicable, as they simply group all the bits and project into tokens for the transformer
@@ -56,11 +68,23 @@ class BQVAE(Module):
             **lfq_kwargs
         )
 
+        self.decoder = nn.Conv2d(dim, 3, 1)
+
     def forward(
         self,
-        images: Float['b c h w']
+        images: Float['b {self._c} h w'],
+        return_loss = False
     ):
-        return images.sum()
+        x = self.encoder(images)
+
+        quantized, *_ = self.lfq(x)
+
+        recon = self.decoder(x)
+
+        if not return_loss:
+            return recon
+
+        return F.mse_loss(images, recon)
 
 # class
 
@@ -75,22 +99,31 @@ class MaskBit(Module):
         depth,
         dim_head = 64,
         heads = 8,
-        encoder_kwargs: dict = dict()
+        encoder_kwargs: dict = dict(),
+        loss_ignore_index = -1
     ):
         super().__init__()
+
         self.to_tokens = nn.Linear(bits_group_size, dim)
 
         self.transformer = Encoder(
             dim = dim,
             depth = depth,
-            dim_head = dim_head,
+            attn_dim_head = dim_head,
             heads = heads,
             **encoder_kwargs
         )
 
-        self.to_unmasked_bit_pred = nn.Linear(dim, bits_group_size)
+        self.to_unmasked_bit_pred = nn.Sequential(
+            nn.Linear(dim, bits_group_size * 2),
+            Rearrange('... (g bits) -> ... g bits', bits = 2)
+        )
+
+        self.loss_ignore_index = loss_ignore_index
 
     def forward(
-        self
+        self,
+        bits: Bool['b n'],
+        bit_mask: Bool['b n']  # for iterative masking for NAR decoding
     ):
         return
