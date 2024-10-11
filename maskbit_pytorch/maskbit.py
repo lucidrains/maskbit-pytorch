@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from math import ceil
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -189,9 +191,11 @@ class MaskBit(Module):
 
         bits, _ = pack_one(bits, 'b *')
 
+        num_bits = bits.shape[-1]
+
         # mask some fraction of the bits
 
-        mask = torch.rand_like(bits) < mask_frac
+        mask = torch.rand_like(bits).argsort(dim = -1) < ceil(mask_frac * num_bits)
         bits.masked_fill_(mask, 0.) # main contribution of the paper is just this line of code where they mask bits to 0.
 
         # attention
