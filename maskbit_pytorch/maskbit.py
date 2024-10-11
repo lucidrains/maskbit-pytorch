@@ -147,22 +147,18 @@ class MaskBit(Module):
         vae.eval()
         self.vae = vae
 
-        self.to_tokens = nn.Sequential(
+        self.demasking_transformer = nn.Sequential(
             Rearrange('b (n g) -> b n g', g = bits_group_size),
-            nn.Linear(bits_group_size, dim)
-        )
-
-        self.transformer = Encoder(
-            dim = dim,
-            depth = depth,
-            attn_dim_head = dim_head,
-            heads = heads,
-            **encoder_kwargs
-        )
-
-        self.to_unmasked_bit_pred = nn.Sequential(
+            nn.Linear(bits_group_size, dim),
+            Encoder(
+                dim = dim,
+                depth = depth,
+                attn_dim_head = dim_head,
+                heads = heads,
+                **encoder_kwargs
+            ),
             nn.Linear(dim, bits_group_size * 2),
-            Rearrange('... (g bits) -> ... g bits', bits = 2)
+            Rearrange('b n (g bits) -> b (n g) bits', bits = 2)
         )
 
         self.loss_ignore_index = loss_ignore_index
@@ -171,21 +167,45 @@ class MaskBit(Module):
 
         self._c = vae.channels
 
+    def sample(self, batch_size = 1):
+        raise NotImplementedError
+
     def forward(
         self,
-        images: Float['b {self._c} h w']
+        images: Float['b {self._c} h w'],
+        mask_frac: float
     ):
-        bits = self.vae(
-            images,
-            return_quantized_bits = True
+        assert 0. <= mask_frac <= 1.
+
+        with torch.no_grad():
+            self.vae.eval()
+
+            bits = self.vae(
+                images,
+                return_quantized_bits = True
+            )
+
+        # pack the bits into one long sequence
+
+        bits, _ = pack_one(bits, 'b *')
+
+        # mask some fraction of the bits
+
+        mask = torch.rand_like(bits) < mask_frac
+        bits.masked_fill_(mask, 0.) # main contribution of the paper is just this line of code where they mask bits to 0.
+
+        # attention
+
+        preds = self.demasking_transformer(bits)
+
+        # get loss
+
+        labels = (bits[mask] == 1.).long()
+
+        loss = F.cross_entropy(
+            preds[mask],
+            labels,
+            ignore_index = self.loss_ignore_index
         )
 
-        bit_seq, unpack_one = pack_one(bits, 'b *')
-
-        tokens = self.to_tokens(bit_seq)
-
-        tokens = self.transformer(tokens)
-
-        pred = self.to_unmasked_bit_pred(tokens)
-
-        return pred
+        return loss
