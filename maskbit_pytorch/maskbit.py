@@ -40,14 +40,57 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
-# class
+# binary quantization vae
 
-class MaskBit(Module):
+class BQVAE(Module):
     def __init__(
         self,
-        dim
+        dim,
+        lfq_kwargs: dict = dict()
     ):
         super().__init__()
 
-    def forward(self, x):
-        return x
+        self.lfq = LFQ(
+            codebook_size = 2, # number of codes is not applicable, as they simply group all the bits and project into tokens for the transformer
+            dim = dim,
+            **lfq_kwargs
+        )
+
+    def forward(
+        self,
+        images: Float['b c h w']
+    ):
+        return images.sum()
+
+# class
+
+class MaskBit(Module):
+    @beartype
+    def __init__(
+        self,
+        vae: BQVAE,
+        *,
+        bits_group_size,
+        dim,
+        depth,
+        dim_head = 64,
+        heads = 8,
+        encoder_kwargs: dict = dict()
+    ):
+        super().__init__()
+        self.to_tokens = nn.Linear(bits_group_size, dim)
+
+        self.transformer = Encoder(
+            dim = dim,
+            depth = depth,
+            dim_head = dim_head,
+            heads = heads,
+            **encoder_kwargs
+        )
+
+        self.to_unmasked_bit_pred = nn.Linear(dim, bits_group_size)
+
+    def forward(
+        self
+    ):
+        return
