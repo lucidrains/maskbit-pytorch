@@ -8,6 +8,30 @@ This paper can be viewed as a modernized version of the architecture from [Tamin
 
 They use the binary scalar quantization proposed in [MagVit2](https://arxiv.org/abs/2310.05737) in their autoencoder, and then non-autoregressive mask decoding, where the masking is setting the bit (`-1` or `+1`) to `0`, projected for the transformer without explicit embeddings for the trit
 
+## Usage
+
+```python
+import torch
+from maskbit_pytorch import BQVAE, MaskBit
+
+images = torch.randn(1, 3, 64, 64)
+
+vae = BQVAE(512)
+
+loss = vae(images, return_loss = True)
+loss.backward()
+
+maskbit = MaskBit(
+    vae,
+    dim = 512,
+    bits_group_size = 512,
+    depth = 2
+)
+
+loss = maskbit(images)
+loss.backward()
+```
+
 ## Citations
 
 ```bibtex
