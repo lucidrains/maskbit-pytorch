@@ -11,10 +11,7 @@ from vector_quantize_pytorch import (
     LFQ
 )
 
-from x_transformers import (
-    Encoder,
-    NonAutoregressiveWrapper
-)
+from x_transformers import Encoder
 
 from einops.layers.torch import Rearrange
 from einops import rearrange, pack, unpack
@@ -97,7 +94,7 @@ class BQVAE(Module):
         self,
         images: Float['b {self._c} h w'],
         *,
-        return_loss = False,
+        return_loss = True,
         return_loss_breakdown = False,
         return_quantized_bits = False
     ):
@@ -174,16 +171,16 @@ class MaskBit(Module):
 
     def forward(
         self,
-        images: Float['b {self._c} h w'],
-        mask_frac: float
+        images: Float['b {self._c} h w']
     ):
-        assert 0. <= mask_frac <= 1.
+        batch, device = images.shape[0], images.device
 
         with torch.no_grad():
             self.vae.eval()
 
             bits = self.vae(
                 images,
+                return_loss = False,
                 return_quantized_bits = True
             )
 
@@ -193,9 +190,15 @@ class MaskBit(Module):
 
         num_bits = bits.shape[-1]
 
+        # get the masking fraction, which is a function of time and the noising schedule (we will go with the successful cosine schedule here from Nichol et al)
+
+        times = torch.rand(batch, device = device)
+        noise_level = torch.cos(times * torch.pi * 0.5)
+        num_bits_mask = (num_bits * noise_level).ceil().clamp(min = 1)
+
         # mask some fraction of the bits
 
-        mask = torch.rand_like(bits).argsort(dim = -1) < ceil(mask_frac * num_bits)
+        mask = torch.rand_like(bits).argsort(dim = -1) < num_bits_mask
         bits.masked_fill_(mask, 0.) # main contribution of the paper is just this line of code where they mask bits to 0.
 
         # attention
