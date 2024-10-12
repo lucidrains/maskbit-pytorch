@@ -191,7 +191,8 @@ class MaskBit(Module):
         self,
         seq_len,
         batch_size = 1,
-        num_demasking_steps = 18
+        num_demasking_steps = 18,
+        temperature = 1.
     ):
         device = self.device
 
@@ -221,7 +222,7 @@ class MaskBit(Module):
 
             # sample the bits
 
-            bits = gumbel_sample(logits)
+            bits = gumbel_sample(logits, temperature = temperature)
             bits = (bits * 2 - 1.) # bits are -1. or +1
 
         return bits
