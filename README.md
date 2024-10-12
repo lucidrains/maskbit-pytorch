@@ -30,6 +30,10 @@ maskbit = MaskBit(
 
 loss = maskbit(images)
 loss.backward()
+
+# after much training
+
+sampled = maskbit.sample(1024) # (1, 1024) of bits {-1, +1}
 ```
 
 ## Citations

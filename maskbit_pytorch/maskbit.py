@@ -3,7 +3,7 @@ from __future__ import annotations
 from math import ceil
 
 import torch
-from torch import nn
+from torch import nn, pi
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 
@@ -57,6 +57,22 @@ def pack_one(t, pattern):
         return unpack(t, packed_shape, unpack_pattern)[0]
 
     return t, inverse
+
+# tensor helpers
+
+def log(t, eps = 1e-20):
+    return t.clamp(min = eps).log()
+
+def calc_entropy(logits):
+    prob = logits.softmax(dim = -1)
+    return (-prob * log(prob)).sum(dim = -1)
+
+def gumbel_noise(t):
+    noise = torch.rand_like(t)
+    return -log(-log(noise))
+
+def gumbel_sample(t, temperature = 1., dim = -1):
+    return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim)
 
 # binary quantization vae
 
@@ -166,14 +182,55 @@ class MaskBit(Module):
 
         self._c = vae.channels
 
-    def sample(self, batch_size = 1):
-        raise NotImplementedError
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @torch.no_grad()
+    def sample(
+        self,
+        seq_len,
+        batch_size = 1,
+        num_demasking_steps = 18
+    ):
+        device = self.device
+
+        bits = torch.zeros(batch_size, seq_len, device = device) # start off all masked, 0.
+
+        # times go from 0. to 1. for `num_demasking_steps`
+
+        times = torch.linspace(0., 1., num_demasking_steps, device = device)
+        noise_levels = torch.cos(times * pi * 0.5)
+        num_bits_to_mask = (noise_levels * seq_len).long().ceil().clamp(min = 1)
+
+        # iteratively denoise with attention
+
+        for ind, bits_to_mask in enumerate(num_bits_to_mask):
+            is_first = ind == 0
+
+            # if not the first step, mask by the previous step's bit predictions with highest entropy
+
+            if not is_first:
+                entropy = calc_entropy(logits)
+                remask_indices = entropy.topk(bits_to_mask.item(), dim = -1).indices
+                bits.scatter_(1, remask_indices, 0.) # recall they use 0. for masking
+
+            # ask the attention network to predict the bits
+
+            logits = self.demasking_transformer(bits)
+
+            # sample the bits
+
+            bits = gumbel_sample(logits)
+            bits = (bits * 2 - 1.) # bits are -1. or +1
+
+        return bits
 
     def forward(
         self,
         images: Float['b {self._c} h w']
     ):
-        batch, device = images.shape[0], images.device
+        batch, device = images.shape[0], self.device
 
         with torch.no_grad():
             self.vae.eval()
@@ -193,7 +250,7 @@ class MaskBit(Module):
         # get the masking fraction, which is a function of time and the noising schedule (we will go with the successful cosine schedule here from Nichol et al)
 
         times = torch.rand(batch, device = device)
-        noise_level = torch.cos(times * torch.pi * 0.5)
+        noise_level = torch.cos(times * pi * 0.5)
         num_bits_mask = (num_bits * noise_level).ceil().clamp(min = 1)
 
         # mask some fraction of the bits
