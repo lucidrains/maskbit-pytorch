@@ -112,7 +112,8 @@ class BQVAE(Module):
         *,
         return_loss = True,
         return_loss_breakdown = False,
-        return_quantized_bits = False
+        return_quantized_bits = False,
+        return_bits_as_bool = False
     ):
         assert not (return_loss and return_quantized_bits)
 
@@ -121,6 +122,9 @@ class BQVAE(Module):
         quantized, _, entropy_aux_loss = self.lfq(x)
 
         if return_quantized_bits:
+            if return_bits_as_bool:
+                quantized = quantized > 0.
+
             return quantized
 
         recon = self.decoder(x)
@@ -192,7 +196,8 @@ class MaskBit(Module):
         seq_len,
         batch_size = 1,
         num_demasking_steps = 18,
-        temperature = 1.
+        temperature = 1.,
+        return_bits_as_bool = False
     ):
         device = self.device
 
@@ -224,6 +229,9 @@ class MaskBit(Module):
 
             bits = gumbel_sample(logits, temperature = temperature)
             bits = (bits * 2 - 1.) # bits are -1. or +1
+
+        if return_bits_as_bool:
+            bits = bits > 0.
 
         return bits
 
