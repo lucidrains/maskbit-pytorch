@@ -16,6 +16,8 @@ from x_transformers import Encoder
 from einops.layers.torch import Rearrange
 from einops import rearrange, pack, unpack
 
+from tqdm import tqdm
+
 # ein notation
 # b - batch
 # c - channels
@@ -83,11 +85,13 @@ class BQVAE(Module):
         self,
         dim,
         *,
+        image_size,
         channels = 3,
         entropy_loss_weight = 0.1,
         lfq_kwargs: dict = dict()
     ):
         super().__init__()
+        self.image_size = image_size
         self.channels = channels
 
         self.encoder = nn.Conv2d(channels, dim, 1)
@@ -102,9 +106,29 @@ class BQVAE(Module):
 
         self.decoder = nn.Conv2d(dim, channels, 1)
 
+        # precompute how many bits a single sample is compressed to
+        # so maskbit can take this value during sampling
+
+        self.bits_per_image = dim * (image_size ** 2)
+
         # tensor typing related
 
         self._c = channels
+
+    def decode_bits_to_images(
+        self,
+        bits: Float['b d h w'] | Float['b n'] | Bool['b d h w'] | Bool['b n']
+    ):
+
+        if bits.dtype == torch.bool:
+            bits = bits.float() * 2 - 1
+
+        if bits.ndim == 2:
+            bits = rearrange(bits, 'b (d h w) -> b d h w', h = self.image_size, w = self.image_size)
+
+        recon = self.decoder(bits)
+
+        return recon
 
     def forward(
         self,
@@ -115,19 +139,24 @@ class BQVAE(Module):
         return_quantized_bits = False,
         return_bits_as_bool = False
     ):
+        batch = images.shape[0]
+
+        assert images.shape[-2:] == ((self.image_size,) * 2)
         assert not (return_loss and return_quantized_bits)
 
         x = self.encoder(images)
 
-        quantized, _, entropy_aux_loss = self.lfq(x)
+        bits, _, entropy_aux_loss = self.lfq(x)
 
         if return_quantized_bits:
             if return_bits_as_bool:
-                quantized = quantized > 0.
+                bits = bits > 0.
 
-            return quantized
+            return bits
 
-        recon = self.decoder(x)
+        assert (bits.numel() // batch) == self.bits_per_image
+
+        recon = self.decoder(bits)
 
         if not return_loss:
             return recon
@@ -193,13 +222,14 @@ class MaskBit(Module):
     @torch.no_grad()
     def sample(
         self,
-        seq_len,
         batch_size = 1,
         num_demasking_steps = 18,
         temperature = 1.,
         return_bits_as_bool = False
     ):
         device = self.device
+
+        seq_len = self.vae.bits_per_image
 
         bits = torch.zeros(batch_size, seq_len, device = device) # start off all masked, 0.
 
@@ -211,7 +241,7 @@ class MaskBit(Module):
 
         # iteratively denoise with attention
 
-        for ind, bits_to_mask in enumerate(num_bits_to_mask):
+        for ind, bits_to_mask in tqdm(enumerate(num_bits_to_mask)):
             is_first = ind == 0
 
             # if not the first step, mask by the previous step's bit predictions with highest entropy
@@ -233,7 +263,7 @@ class MaskBit(Module):
         if return_bits_as_bool:
             bits = bits > 0.
 
-        return bits
+        return self.vae.decode_bits_to_images(bits)
 
     def forward(
         self,

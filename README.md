@@ -16,10 +16,17 @@ from maskbit_pytorch import BQVAE, MaskBit
 
 images = torch.randn(1, 3, 64, 64)
 
-vae = BQVAE(512)
+# train vae
+
+vae = BQVAE(
+    image_size = 64,
+    dim = 512
+)
 
 loss = vae(images, return_loss = True)
 loss.backward()
+
+# train maskbit
 
 maskbit = MaskBit(
     vae,
@@ -33,7 +40,7 @@ loss.backward()
 
 # after much training
 
-sampled = maskbit.sample(1024) # (1, 1024) of bits {-1, +1}
+sampled_image = maskbit.sample() # (1, 3, 64, 64)
 ```
 
 ## Citations
