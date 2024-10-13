@@ -188,7 +188,8 @@ class MaskBit(Module):
         dim_head = 64,
         heads = 8,
         encoder_kwargs: dict = dict(),
-        loss_ignore_index = -1
+        loss_ignore_index = -1,
+        train_frac_bits_flipped = 0.05
     ):
         super().__init__()
 
@@ -210,6 +211,8 @@ class MaskBit(Module):
         )
 
         self.loss_ignore_index = loss_ignore_index
+
+        self.train_frac_bits_flipped = train_frac_bits_flipped
 
         # tensor typing
 
@@ -290,7 +293,15 @@ class MaskBit(Module):
 
         bits, _ = pack_one(bits, 'b *')
 
-        num_bits = bits.shape[-1]
+        num_bits, orig_bits = bits.shape[-1], bits
+
+        # flip a few of the bits, so that the model learns to predict for tokens that are not masked
+
+        if self.train_frac_bits_flipped > 0.:
+            num_bits_to_flip = num_bits * self.train_frac_bits_flipped
+            flip_mask = torch.rand_like(bits).argsort(dim = -1) < num_bits_to_flip
+
+            bits = torch.where(flip_mask, bits * -1, bits)
 
         # get the masking fraction, which is a function of time and the noising schedule (we will go with the successful cosine schedule here from Nichol et al)
 
@@ -307,12 +318,16 @@ class MaskBit(Module):
 
         preds = self.demasking_transformer(bits)
 
+        # loss mask
+
+        loss_mask = mask | flip_mask
+
         # get loss
 
-        labels = (bits[mask] == 1.).long()
+        labels = (orig_bits[loss_mask] > 0.).long()
 
         loss = F.cross_entropy(
-            preds[mask],
+            preds[loss_mask],
             labels,
             ignore_index = self.loss_ignore_index
         )
