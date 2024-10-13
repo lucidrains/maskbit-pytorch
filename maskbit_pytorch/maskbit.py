@@ -225,7 +225,8 @@ class MaskBit(Module):
         batch_size = 1,
         num_demasking_steps = 18,
         temperature = 1.,
-        return_bits_as_bool = False
+        return_bits = False,
+        return_bits_as_bool = False,
     ):
         device = self.device
 
@@ -260,10 +261,15 @@ class MaskBit(Module):
             bits = gumbel_sample(logits, temperature = temperature)
             bits = (bits * 2 - 1.) # bits are -1. or +1
 
+        images = self.vae.decode_bits_to_images(bits)
+
+        if not return_bits:
+            return images
+
         if return_bits_as_bool:
             bits = bits > 0.
 
-        return self.vae.decode_bits_to_images(bits)
+        return images, bits
 
     def forward(
         self,
