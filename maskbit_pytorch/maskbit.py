@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import ceil
+from math import ceil, prod
 
 import torch
 from torch import nn, pi
@@ -14,7 +14,7 @@ from vector_quantize_pytorch import (
 from x_transformers import Encoder
 
 from einops.layers.torch import Rearrange
-from einops import rearrange, pack, unpack
+from einops import rearrange, repeat, pack, unpack
 
 from tqdm import tqdm
 
@@ -76,6 +76,49 @@ def gumbel_noise(t):
 def gumbel_sample(t, temperature = 1., dim = -1):
     return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim)
 
+# down and upsample
+
+class Upsample(Module):
+    def __init__(
+        self,
+        dim,
+        dim_out = None
+    ):
+        super().__init__()
+        dim_out = default(dim_out, dim)
+        conv = nn.Conv2d(dim, dim_out * 4, 1)
+
+        self.net = nn.Sequential(
+            conv,
+            nn.SiLU(),
+            nn.PixelShuffle(2)
+        )
+
+        self.init_conv_(conv)
+
+    def init_conv_(self, conv):
+        o, i, h, w = conv.weight.shape
+        conv_weight = torch.empty(o // 4, i, h, w)
+        nn.init.kaiming_uniform_(conv_weight)
+        conv_weight = repeat(conv_weight, 'o ... -> (o 4) ...')
+
+        conv.weight.data.copy_(conv_weight)
+        nn.init.zeros_(conv.bias.data)
+
+    def forward(self, x):
+        return self.net(x)
+
+def Downsample(
+    dim,
+    dim_out = None
+):
+    dim_out = default(dim_out, dim)
+
+    return nn.Sequential(
+        Rearrange('b c (h s1) (w s2) -> b (c s1 s2) h w', s1 = 2, s2 = 2),
+        nn.Conv2d(dim * 4, dim_out, 1)
+    )
+
 # binary quantization vae
 
 class BQVAE(Module):
@@ -87,6 +130,8 @@ class BQVAE(Module):
         *,
         image_size,
         channels = 3,
+        depth = 2,
+        proj_in_kernel_size = 7,
         entropy_loss_weight = 0.1,
         lfq_kwargs: dict = dict()
     ):
@@ -94,22 +139,47 @@ class BQVAE(Module):
         self.image_size = image_size
         self.channels = channels
 
-        self.encoder = nn.Conv2d(channels, dim, 1)
+        self.proj_in = nn.Conv2d(channels, dim, proj_in_kernel_size, padding = proj_in_kernel_size // 2)
 
-        self.lfq = LFQ(
-            codebook_size = 2, # number of codes is not applicable, as they simply group all the bits and project into tokens for the transformer
-            dim = dim,
-            **lfq_kwargs
-        )
+        self.encoder = ModuleList([])
 
-        self.entropy_loss_weight = entropy_loss_weight
+        # encoder
 
-        self.decoder = nn.Conv2d(dim, channels, 1)
+        curr_dim = dim
+        for _ in range(depth):
+            self.encoder.append(Downsample(curr_dim, curr_dim * 2))
+
+            curr_dim *= 2
+            image_size //= 2
+
+        # codebook
+
+        self.codebook_input_shape = (curr_dim, image_size, image_size)
 
         # precompute how many bits a single sample is compressed to
         # so maskbit can take this value during sampling
 
-        self.bits_per_image = dim * (image_size ** 2)
+        self.bits_per_image = prod(self.codebook_input_shape)
+
+        self.lfq = LFQ(
+            codebook_size = 2, # number of codes is not applicable, as they simply group all the bits and project into tokens for the transformer
+            dim = curr_dim,
+            **lfq_kwargs
+        )
+
+        # decoder
+
+        self.decoder = ModuleList([])
+
+        for _ in range(depth):
+            self.decoder.append(Upsample(curr_dim, curr_dim // 2))
+            curr_dim //= 2
+
+        self.proj_out = nn.Conv2d(curr_dim, channels, 3, padding = 1)
+
+        # aux loss
+
+        self.entropy_loss_weight = entropy_loss_weight
 
         # tensor typing related
 
@@ -124,9 +194,15 @@ class BQVAE(Module):
             bits = bits.float() * 2 - 1
 
         if bits.ndim == 2:
-            bits = rearrange(bits, 'b (d h w) -> b d h w', h = self.image_size, w = self.image_size)
+            fmap_height, fmap_width = self.codebook_input_shape[-2:]
+            bits = rearrange(bits, 'b (d h w) -> b d h w', h = fmap_height, w = fmap_width)
 
-        recon = self.decoder(bits)
+        x = bits
+
+        for fn in self.decoder:
+            x = fn(x)
+
+        recon = self.proj_out(x)
 
         return recon
 
@@ -144,7 +220,10 @@ class BQVAE(Module):
         assert images.shape[-2:] == ((self.image_size,) * 2)
         assert not (return_loss and return_quantized_bits)
 
-        x = self.encoder(images)
+        x = self.proj_in(images)
+
+        for fn in self.encoder:
+            x = fn(x)
 
         bits, _, entropy_aux_loss = self.lfq(x)
 
@@ -156,7 +235,12 @@ class BQVAE(Module):
 
         assert (bits.numel() // batch) == self.bits_per_image
 
-        recon = self.decoder(bits)
+        x = bits
+
+        for fn in self.decoder:
+            x = fn(x)
+
+        recon = self.proj_out(x)
 
         if not return_loss:
             return recon
