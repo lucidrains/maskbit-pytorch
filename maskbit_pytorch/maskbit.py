@@ -76,6 +76,40 @@ def gumbel_noise(t):
 def gumbel_sample(t, temperature = 1., dim = -1):
     return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim)
 
+# resnet block
+
+class Block(Module):
+    def __init__(
+        self,
+        dim,
+        dropout = 0.
+    ):
+        super().__init__()
+        self.proj = nn.Conv2d(dim, dim, 3, padding = 1)
+        self.act = nn.SiLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.proj(x)
+        x = self.act(x)
+        return self.dropout(x)
+
+class ResnetBlock(Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        dropout = 0.
+    ):
+        super().__init__()
+        self.block1 = Block(dim, dropout = dropout)
+        self.block2 = Block(dim)
+
+    def forward(self, x):
+        h = self.block1(x)
+        h = self.block2(h)
+        return h + x
+
 # down and upsample
 
 class Upsample(Module):
@@ -147,10 +181,17 @@ class BQVAE(Module):
 
         curr_dim = dim
         for _ in range(depth):
-            self.encoder.append(Downsample(curr_dim, curr_dim * 2))
+            self.encoder.append(ModuleList([
+                ResnetBlock(curr_dim),
+                Downsample(curr_dim, curr_dim * 2)
+            ]))
 
             curr_dim *= 2
             image_size //= 2
+
+        # middle
+
+        self.mid_block = ResnetBlock(curr_dim)
 
         # codebook
 
@@ -172,7 +213,11 @@ class BQVAE(Module):
         self.decoder = ModuleList([])
 
         for _ in range(depth):
-            self.decoder.append(Upsample(curr_dim, curr_dim // 2))
+            self.decoder.append(ModuleList([
+                Upsample(curr_dim, curr_dim // 2),
+                ResnetBlock(curr_dim // 2),
+            ]))
+
             curr_dim //= 2
 
         self.proj_out = nn.Conv2d(curr_dim, channels, 3, padding = 1)
@@ -199,8 +244,9 @@ class BQVAE(Module):
 
         x = bits
 
-        for fn in self.decoder:
-            x = fn(x)
+        for upsample, resnet in self.decoder:
+            x = upsample(x)
+            x = resnet(x)
 
         recon = self.proj_out(x)
 
@@ -222,8 +268,11 @@ class BQVAE(Module):
 
         x = self.proj_in(images)
 
-        for fn in self.encoder:
-            x = fn(x)
+        for resnet, downsample in self.encoder:
+            x = resnet(x)
+            x = downsample(x)
+
+        x = self.mid_block(x)
 
         bits, _, entropy_aux_loss = self.lfq(x)
 
@@ -237,8 +286,9 @@ class BQVAE(Module):
 
         x = bits
 
-        for fn in self.decoder:
-            x = fn(x)
+        for upsample, resnet in self.decoder:
+            x = upsample(x)
+            x = resnet(x)
 
         recon = self.proj_out(x)
 
