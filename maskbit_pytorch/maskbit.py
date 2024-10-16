@@ -13,6 +13,7 @@ from vector_quantize_pytorch import (
 
 from x_transformers import Encoder
 
+import einx
 from einops.layers.torch import Rearrange
 from einops import rearrange, repeat, pack, unpack
 
@@ -24,6 +25,7 @@ from tqdm import tqdm
 # h - height
 # w - width
 # n - raw bits sequence length
+# ng - sequence of bit groups
 
 # tensor typing
 
@@ -50,6 +52,9 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def divisible_by(num, den):
+    return (num % den) == 0
 
 def pack_one(t, pattern):
     t, packed_shape = pack([t], pattern)
@@ -319,6 +324,7 @@ class MaskBit(Module):
         bits_group_size,
         dim,
         depth,
+        bits_groups = 2,
         dim_head = 64,
         heads = 8,
         encoder_kwargs: dict = dict(),
@@ -329,6 +335,12 @@ class MaskBit(Module):
 
         vae.eval()
         self.vae = vae
+
+        self.bits_groups = bits_groups
+        # bits_group_size (bits per "token") / bit_groups consecutive bits are masked at a time
+
+        assert divisible_by(bits_group_size, bits_groups)
+        self.consecutive_bits_to_mask = bits_group_size // bits_groups
 
         self.demasking_transformer = nn.Sequential(
             Rearrange('b (n g) -> b n g', g = bits_group_size),
@@ -441,18 +453,30 @@ class MaskBit(Module):
 
         times = torch.rand(batch, device = device)
         noise_level = torch.cos(times * pi * 0.5)
-        num_bits_mask = (num_bits * noise_level).ceil().clamp(min = 1)
+
+        # determine num bit groups and reshape
+
+        assert divisible_by(num_bits, self.consecutive_bits_to_mask)
+
+        bits = rearrange(bits, 'b (ng g) -> b ng g', g = self.consecutive_bits_to_mask)
+
+        bit_group_seq_len = bits.shape[1]
+
+        num_bit_group_mask = (bit_group_seq_len * noise_level).ceil().clamp(min = 1)
 
         # mask some fraction of the bits
 
-        mask = torch.rand_like(bits).argsort(dim = -1) < num_bits_mask
-        bits.masked_fill_(mask, 0.) # main contribution of the paper is just this line of code where they mask bits to 0.
+        mask = torch.rand((batch, bit_group_seq_len), device = device).argsort(dim = -1) < num_bit_group_mask
+
+        masked_bits = einx.where('b ng, , b ng g -> b (ng g)', mask, 0., bits) # main contribution of the paper is just this line of code where they mask bits to 0.
 
         # attention
 
-        preds = self.demasking_transformer(bits)
+        preds = self.demasking_transformer(masked_bits)
 
         # loss mask
+
+        mask = repeat(mask, 'b ng -> b (ng g)', g = self.consecutive_bits_to_mask)
 
         loss_mask = mask | flip_mask
 
