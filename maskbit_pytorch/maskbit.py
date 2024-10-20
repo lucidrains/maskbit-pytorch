@@ -3,7 +3,7 @@ from __future__ import annotations
 from math import ceil, prod
 
 import torch
-from torch import nn, pi
+from torch import nn, pi, tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 
@@ -80,6 +80,80 @@ def gumbel_noise(t):
 
 def gumbel_sample(t, temperature = 1., dim = -1):
     return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim)
+
+# adversarial related
+
+def hinge_discr_loss(fake, real):
+    return (F.relu(1 + fake) + F.relu(1 - real)).mean()
+
+def hinge_gen_loss(fake):
+    return -fake.mean()
+
+class ChanRMSNorm(Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x):
+        gamma = rearrange(self.gamma, 'c -> c 1 1')
+        return F.normalize(x, dim = 1) * self.scale * (gamma + 1)
+
+class Discriminator(Module):
+    def __init__(
+        self,
+        dims: tuple[int, ...],
+        channels = 3,
+        init_kernel_size = 5
+    ):
+        super().__init__()
+        first_dim, *_, last_dim = dims
+        dim_pairs = zip(dims[:-1], dims[1:])
+
+        self.layers = ModuleList([])
+
+        self.layers.append(
+            nn.Sequential(
+                nn.Conv2d(channels, first_dim, init_kernel_size, padding = init_kernel_size // 2),
+                nn.SiLU()
+            )
+        )
+
+        for dim_in, dim_out in dim_pairs:
+            layer = nn.Sequential(
+                nn.Conv2d(dim_in, dim_out, 4, stride = 2, padding = 1),
+                ChanRMSNorm(dim_out),
+                nn.SiLU()
+            )
+
+            self.layers.append(layer)
+
+        dim = last_dim
+
+        self.to_logits = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            nn.SiLU(),
+            nn.Conv2d(dim, 1, 4)
+        )
+
+        # for keeping track of the exponential moving averages of real and fake predictions
+        # for the lecam divergence gan technique employed https://arxiv.org/abs/2104.03310
+
+        self.register_buffer('ema_real_initted', tensor(False))
+        self.register_buffer('ema_real', tensor(0.))
+
+        self.register_buffer('ema_fake_initted', tensor(False))
+        self.register_buffer('ema_fake', tensor(0.))
+
+    def forward(
+        self,
+        x: Float['b c h w']
+    ):
+        for layer in self.layers:
+            x = layer(x)
+
+        pred = self.to_logits(x)
+        return pred
 
 # resnet block
 
