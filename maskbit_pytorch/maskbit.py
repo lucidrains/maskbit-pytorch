@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from math import ceil, prod
+from functools import cache
 
 import torch
 from torch import nn, pi, tensor
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.nn import Module, ModuleList
 
 from vector_quantize_pytorch import (
@@ -65,6 +67,20 @@ def pack_one(t, pattern):
 
     return t, inverse
 
+# distributed helpers
+
+@cache
+def is_distributed():
+    return dist.is_initialized() and dist.get_world_size() > 1
+
+def maybe_distributed_mean(t):
+    if not is_distributed():
+        return t
+
+    dist.all_reduce(t)
+    t = t / dist.get_world_size()
+    return t
+
 # tensor helpers
 
 def log(t, eps = 1e-20):
@@ -104,7 +120,9 @@ class Discriminator(Module):
         self,
         dims: tuple[int, ...],
         channels = 3,
-        init_kernel_size = 5
+        init_kernel_size = 5,
+        ema_decay = 0.99,
+        reg_loss_weight = 1e-2
     ):
         super().__init__()
         first_dim, *_, last_dim = dims
@@ -139,21 +157,66 @@ class Discriminator(Module):
         # for keeping track of the exponential moving averages of real and fake predictions
         # for the lecam divergence gan technique employed https://arxiv.org/abs/2104.03310
 
+        self.ema_decay = ema_decay
+
         self.register_buffer('ema_real_initted', tensor(False))
         self.register_buffer('ema_real', tensor(0.))
 
         self.register_buffer('ema_fake_initted', tensor(False))
         self.register_buffer('ema_fake', tensor(0.))
 
+    @torch.no_grad()
+    def update_ema(
+        self,
+        preds: Float['b'],
+        mask: Bool['b'],
+        is_real: bool
+    ):
+        if not mask.any():
+            return
+
+        initted, ema = (self.ema_real_initted, self.ema_real) if is_real else (self.ema_fake_initted, self.ema_fake)
+
+        avg_pred = preds[mask].mean()
+        avg_pred = maybe_distributed_mean(avg_pred)
+
+        if not initted:
+            ema.copy_(avg_pred)
+            initted.copy_(tensor(True))
+            return
+
+        ema.lerp_(avg_pred, 1. - self.ema_decay)
+
     def forward(
         self,
-        x: Float['b c h w']
+        x: Float['b c h w'],
+        is_real_fake: bool | Bool['b'] | None = None
     ):
+        batch, device = x.shape[0], x.device
+
         for layer in self.layers:
             x = layer(x)
 
-        pred = self.to_logits(x)
-        return pred
+        preds = self.to_logits(x)
+
+        if not self.training or not exists(is_real_fake):
+            return preds
+
+        if isinstance(is_real_fake, bool):
+            is_real_fake = torch.full((batch,), is_real_fake, dtype = torch.bool, device = device)
+
+        self.update_ema(preds, is_real_fake, is_real = True)
+        self.update_ema(preds, ~is_real_fake, is_real = False)
+
+        reg_loss = 0.
+
+        if is_real_fake.any():
+            reg_loss = reg_loss + F.mse_loss(preds[is_real_fake], self.ema_real)
+
+        if (~is_real_fake).any():
+            reg_loss = reg_loss + F.mse_loss(preds[~is_real_fake], self.ema_fake)
+
+        return preds, reg_loss
 
 # resnet block
 
@@ -246,6 +309,7 @@ class BQVAE(Module):
         depth = 2,
         proj_in_kernel_size = 7,
         entropy_loss_weight = 0.1,
+        reg_loss_weight = 1e-2,
         lfq_kwargs: dict = dict()
     ):
         super().__init__()
@@ -304,6 +368,8 @@ class BQVAE(Module):
         # aux loss
 
         self.entropy_loss_weight = entropy_loss_weight
+
+        self.reg_loss_weight  = reg_loss_weight
 
         # tensor typing related
 
