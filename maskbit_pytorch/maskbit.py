@@ -211,10 +211,10 @@ class Discriminator(Module):
         reg_loss = 0.
 
         if is_real_fake.any():
-            reg_loss = reg_loss + F.mse_loss(preds[is_real_fake], self.ema_real)
+            reg_loss = reg_loss + F.mse_loss(preds[is_real_fake], self.ema_fake)
 
         if (~is_real_fake).any():
-            reg_loss = reg_loss + F.mse_loss(preds[~is_real_fake], self.ema_fake)
+            reg_loss = reg_loss + F.mse_loss(preds[~is_real_fake], self.ema_real)
 
         return preds, reg_loss
 
