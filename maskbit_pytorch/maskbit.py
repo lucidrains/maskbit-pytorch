@@ -105,6 +105,31 @@ def hinge_discr_loss(fake, real):
 def hinge_gen_loss(fake):
     return -fake.mean()
 
+class ScalarEMA(Module):
+    def __init__(self, decay: float):
+        super().__init__()
+        self.decay = decay
+
+        self.register_buffer('initted', tensor(False))
+        self.register_buffer('ema', tensor(0.))
+
+    @torch.no_grad()
+    def forward(
+        self,
+        values: Float['b']
+    ):
+        if values.numel() == 0:
+            return
+
+        values = maybe_distributed_mean(values)
+
+        if not self.initted:
+            self.ema.copy_(values)
+            self.initted.copy_(tensor(True))
+            return
+
+        self.ema.lerp_(values, 1. - self.decay)
+
 class ChanRMSNorm(Module):
     def __init__(self, dim):
         super().__init__()
@@ -156,35 +181,8 @@ class Discriminator(Module):
         # for keeping track of the exponential moving averages of real and fake predictions
         # for the lecam divergence gan technique employed https://arxiv.org/abs/2104.03310
 
-        self.ema_decay = ema_decay
-
-        self.register_buffer('ema_real_initted', tensor(False))
-        self.register_buffer('ema_real', tensor(0.))
-
-        self.register_buffer('ema_fake_initted', tensor(False))
-        self.register_buffer('ema_fake', tensor(0.))
-
-    @torch.no_grad()
-    def update_ema(
-        self,
-        preds: Float['b'],
-        mask: Bool['b'],
-        is_real: bool
-    ):
-        if not mask.any():
-            return
-
-        initted, ema = (self.ema_real_initted, self.ema_real) if is_real else (self.ema_fake_initted, self.ema_fake)
-
-        avg_pred = preds[mask].mean()
-        avg_pred = maybe_distributed_mean(avg_pred)
-
-        if not initted:
-            ema.copy_(avg_pred)
-            initted.copy_(tensor(True))
-            return
-
-        ema.lerp_(avg_pred, 1. - self.ema_decay)
+        self.ema_real = ScalarEMA(ema_decay)
+        self.ema_fake = ScalarEMA(ema_decay)
 
     def forward(
         self,
@@ -206,16 +204,19 @@ class Discriminator(Module):
 
         is_fake = ~is_real
 
-        self.update_ema(preds, is_real, is_real = True)
-        self.update_ema(preds, is_fake, is_real = False)
+        preds_real = preds[is_real]
+        preds_fake = preds[is_fake]
+
+        self.ema_real(preds_real.mean())
+        self.ema_fake(preds_fake.mean())
 
         reg_loss = 0.
 
         if is_real.any():
-            reg_loss = reg_loss + ((preds[is_real] - self.ema_fake) ** 2).mean()
+            reg_loss = reg_loss + ((preds_real - self.ema_fake.ema) ** 2).mean()
 
         if is_fake.any():
-            reg_loss = reg_loss + ((preds[is_fake] - self.ema_real) ** 2).mean()
+            reg_loss = reg_loss + ((preds_fake - self.ema_real.ema) ** 2).mean()
 
         return preds, reg_loss
 
