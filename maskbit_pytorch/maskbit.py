@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import ceil, prod
+from math import ceil, prod, log2
 from functools import cache
 
 import torch
@@ -122,7 +122,6 @@ class Discriminator(Module):
         channels = 3,
         init_kernel_size = 5,
         ema_decay = 0.99,
-        reg_loss_weight = 1e-2
     ):
         super().__init__()
         first_dim, *_, last_dim = dims
@@ -190,7 +189,7 @@ class Discriminator(Module):
     def forward(
         self,
         x: Float['b c h w'],
-        is_real_fake: bool | Bool['b'] | None = None
+        is_real: bool | Bool['b'] | None = None
     ):
         batch, device = x.shape[0], x.device
 
@@ -199,22 +198,24 @@ class Discriminator(Module):
 
         preds = self.to_logits(x)
 
-        if not self.training or not exists(is_real_fake):
+        if not self.training or not exists(is_real):
             return preds
 
-        if isinstance(is_real_fake, bool):
-            is_real_fake = torch.full((batch,), is_real_fake, dtype = torch.bool, device = device)
+        if isinstance(is_real, bool):
+            is_real = torch.full((batch,), is_real, dtype = torch.bool, device = device)
 
-        self.update_ema(preds, is_real_fake, is_real = True)
-        self.update_ema(preds, ~is_real_fake, is_real = False)
+        is_fake = ~is_real
+
+        self.update_ema(preds, is_real, is_real = True)
+        self.update_ema(preds, is_fake, is_real = False)
 
         reg_loss = 0.
 
-        if is_real_fake.any():
-            reg_loss = reg_loss + F.mse_loss(preds[is_real_fake], self.ema_fake)
+        if is_real.any():
+            reg_loss = reg_loss + ((preds[is_real] - self.ema_fake) ** 2).mean()
 
-        if (~is_real_fake).any():
-            reg_loss = reg_loss + F.mse_loss(preds[~is_real_fake], self.ema_real)
+        if is_fake.any():
+            reg_loss = reg_loss + ((preds[is_fake] - self.ema_real) ** 2).mean()
 
         return preds, reg_loss
 
@@ -310,7 +311,9 @@ class BQVAE(Module):
         proj_in_kernel_size = 7,
         entropy_loss_weight = 0.1,
         reg_loss_weight = 1e-2,
-        lfq_kwargs: dict = dict()
+        gen_loss_weight = 1e-1,
+        lfq_kwargs: dict = dict(),
+        discr_kwargs: dict = dict()
     ):
         super().__init__()
         self.image_size = image_size
@@ -365,11 +368,21 @@ class BQVAE(Module):
 
         self.proj_out = nn.Conv2d(curr_dim, channels, 3, padding = 1)
 
+        # discriminator
+
+        self.discr = Discriminator(
+            dims = (dim,) * int(log2(image_size) - 2),
+            channels = channels,
+            **discr_kwargs
+        )
+
         # aux loss
 
         self.entropy_loss_weight = entropy_loss_weight
 
         self.reg_loss_weight  = reg_loss_weight
+
+        self.gen_loss_weight = gen_loss_weight
 
         # tensor typing related
 
@@ -402,6 +415,7 @@ class BQVAE(Module):
         images: Float['b {self._c} h w'],
         *,
         return_loss = True,
+        return_discr_loss = False,
         return_loss_breakdown = False,
         return_quantized_bits = False,
         return_bits_as_bool = False
@@ -437,20 +451,42 @@ class BQVAE(Module):
 
         recon = self.proj_out(x)
 
+        if return_discr_loss:
+            images = images.requires_grad_()
+            recon = recon.detach()
+
+            discr_real_logits, reg_loss_real = self.discr(images, is_real = True)
+            discr_fake_logits, reg_loss_fake = self.discr(recon, is_real = False)
+
+            discr_loss = hinge_discr_loss(discr_fake_logits, discr_real_logits)
+            reg_loss = (reg_loss_real + reg_loss_fake) / 2
+
+            loss = discr_loss + reg_loss * self.reg_loss_weight
+
+            if not return_loss_breakdown:
+                return loss
+
+            return loss, (discr_loss, reg_loss_real, reg_loss_fake)
+
         if not return_loss:
             return recon
 
         recon_loss = F.mse_loss(images, recon)
 
+        discr_fake_logits = self.discr(recon)
+
+        gen_loss = hinge_gen_loss(discr_fake_logits)
+
         total_loss = (
             recon_loss +
-            self.entropy_loss_weight * entropy_aux_loss
+            entropy_aux_loss * self.entropy_loss_weight +
+            gen_loss * self.gen_loss_weight
         )
 
         if not return_loss_breakdown:
             return total_loss
 
-        return total_loss, (recon_loss, entropy_aux_loss)
+        return total_loss, (recon_loss, entropy_aux_loss, gen_loss)
 
 # class
 
