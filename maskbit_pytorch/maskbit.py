@@ -52,6 +52,9 @@ Bool  = TorchTyping(jaxtyping.Bool)
 def exists(v):
     return v is not None
 
+def is_empty(t: Tensor):
+    return t.numel() == 0
+
 def default(v, d):
     return v if exists(v) else d
 
@@ -118,9 +121,10 @@ class ScalarEMA(Module):
         self,
         values: Float['b']
     ):
-        if values.numel() == 0:
+        if is_empty(values):
             return
 
+        values = values.mean()
         values = maybe_distributed_mean(values)
 
         if not self.initted:
@@ -207,15 +211,15 @@ class Discriminator(Module):
         preds_real = preds[is_real]
         preds_fake = preds[is_fake]
 
-        self.ema_real(preds_real.mean())
-        self.ema_fake(preds_fake.mean())
+        self.ema_real(preds_real)
+        self.ema_fake(preds_fake)
 
         reg_loss = 0.
 
-        if is_real.any():
+        if not is_empty(preds_real) and self.ema_fake.initted:
             reg_loss = reg_loss + ((preds_real - self.ema_fake.ema) ** 2).mean()
 
-        if is_fake.any():
+        if not is_empty(preds_fake) and self.ema_real.initted:
             reg_loss = reg_loss + ((preds_fake - self.ema_real.ema) ** 2).mean()
 
         return preds, reg_loss
@@ -417,7 +421,7 @@ class BQVAE(Module):
         *,
         return_loss = True,
         return_discr_loss = False,
-        return_loss_breakdown = False,
+        return_details = False,
         return_quantized_bits = False,
         return_bits_as_bool = False
     ):
@@ -460,14 +464,15 @@ class BQVAE(Module):
             discr_fake_logits, reg_loss_fake = self.discr(recon, is_real = False)
 
             discr_loss = hinge_discr_loss(discr_fake_logits, discr_real_logits)
+
             reg_loss = (reg_loss_real + reg_loss_fake) / 2
 
             loss = discr_loss + reg_loss * self.reg_loss_weight
 
-            if not return_loss_breakdown:
+            if not return_details:
                 return loss
 
-            return loss, (discr_loss, reg_loss_real, reg_loss_fake)
+            return loss, recon, (discr_loss, reg_loss_real, reg_loss_fake)
 
         if not return_loss:
             return recon
@@ -484,10 +489,10 @@ class BQVAE(Module):
             gen_loss * self.gen_loss_weight
         )
 
-        if not return_loss_breakdown:
+        if not return_details:
             return total_loss
 
-        return total_loss, (recon_loss, entropy_aux_loss, gen_loss)
+        return total_loss, recon, (recon_loss, entropy_aux_loss, gen_loss)
 
 # class
 

@@ -26,12 +26,16 @@ classifiers=[
 ]
 
 dependencies = [
+    "accelerate",
+    "adam-atan2-pytorch>=0.1.1",
     "beartype",
     "einx>=0.3.0",
     "einops>=0.8.0",
     "ema-pytorch",
     "jaxtyping",
-    "torch>=2.0",
+    "pillow",
+    "torch>=2.2",
+    "torchvision",
     "vector-quantize-pytorch>=1.17.8",
     "x-transformers>=1.37.9"
 ]
