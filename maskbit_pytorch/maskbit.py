@@ -546,6 +546,9 @@ class MaskBit(Module):
 
         self._c = vae.channels
 
+    def parameters(self):
+        return self.demasking_transformer.parameters()
+
     @property
     def device(self):
         return next(self.parameters()).device
